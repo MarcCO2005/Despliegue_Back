@@ -39,6 +39,7 @@ class Comentarios
         $this->comentario = $comentario;
 
         return $this;
+        
     }
 
     public function getUsuario(): ?Socios

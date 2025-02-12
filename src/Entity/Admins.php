@@ -79,5 +79,4 @@ class Admins
 
         return $this;
     }
-
 }
