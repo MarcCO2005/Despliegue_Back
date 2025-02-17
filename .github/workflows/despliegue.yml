@@ -1,96 +1,88 @@
-name: CI/CD Pipeline for Despliegue_Back
+name: Deploy Symfony API with MySQL and Nginx
 
 on:
-  push:
-    branches:
-      - main
+    push:
+        branches:
+            - despliegueDocker
 
 jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_USER: app
-          POSTGRES_PASSWORD: '!ChangeMe!'
-          POSTGRES_DB: app
-        ports:
-          - "5432:5432"
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
+    build-and-push:
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout código
+              uses: actions/checkout@v4
 
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v2
+            - name: Iniciar sesión en Docker Hub
+              uses: docker/login-action@v2
+              with:
+                  username: ${{ secrets.DOCKER_USERNAME }}
+                  password: ${{ secrets.DOCKER_PASSWORD }}
 
-      - name: Set up PHP
-        uses: shivammathur/setup-php@v2
-        with:
-          php-version: '8.3'
-          extensions: pdo_pgsql
-          tools: composer:v2
+            # Construir y subir imagen Symfony
+            - name: Construir y subir imagen Symfony
+              run: |
+                  docker build -t ${{ secrets.DOCKER_USERNAME }}/symfony-app:latest -f backend/EdelmiroMonros/docker/php.Dockerfile backend/EdelmiroMonros/
+                  docker push ${{ secrets.DOCKER_USERNAME }}/symfony-app:latest
 
-      - name: Copy .env
-        run: php -r "file_exists('.env') || copy('.env.example', '.env');"
+            # Construir y subir imagen Nginx
+            - name: Construir y subir imagen Nginx
+              run: |
+                  docker build -t ${{ secrets.DOCKER_USERNAME }}/symfony-nginx:latest -f backend/EdelmiroMonros/docker/nginx.Dockerfile backend/EdelmiroMonros/
+                  docker push ${{ secrets.DOCKER_USERNAME }}/symfony-nginx:latest
 
-      - name: Set environment variables
-        run: |
-          echo "APP_ENV=prod" >> .env
-          echo "APP_DEBUG=0" >> .env
-          echo "DATABASE_URL=postgresql://app:'!ChangeMe!'@localhost:5432/app?serverVersion=16&charset=utf8" >> .env
-          echo "CORS_ALLOW_ORIGIN=^https?://.*?$" >> .env
+    deploy:
+        runs-on: ubuntu-latest
+        needs: build-and-push
+        steps:
+            - name: Checkout código
+              uses: actions/checkout@v4
+              with:
+                  ref: despliegueDocker
 
-      - name: Install dependencies
-        run: |
-          composer install --prefer-dist --no-progress --no-interaction
-          composer dump-autoload --optimize --no-dev --classmap-authoritative
+            - name: Transferir archivos de configuración al servidor remoto
+              uses: appleboy/scp-action@master
+              with:
+                  host: ${{ secrets.REMOTE_HOST }}
+                  username: ${{ secrets.REMOTE_USER }}
+                  key: ${{ secrets.REMOTE_KEY }}
+                  source: |
+                      backend/EdelmiroMonros/compose.yml
+                      backend/EdelmiroMonros/.env
+                      backend/EdelmiroMonros/migrations
+                  target: ~/deploy/
+                  strip_components: 2
 
-      - name: Wait for PostgreSQL
-        run: |
-          while ! nc -z localhost 5432; do
-            echo "Waiting for PostgreSQL to start..."
-            sleep 1
-          done
+            - name: Desplegar en servidor remoto
+              uses: appleboy/ssh-action@master
+              with:
+                  host: ${{ secrets.REMOTE_HOST }}
+                  username: ${{ secrets.REMOTE_USER }}
+                  key: ${{ secrets.REMOTE_KEY }}
+                  script: |
+                      sudo chmod 666 /var/run/docker.sock
+                      echo ${{ secrets.DOCKER_PASSWORD }} | docker login -u ${{ secrets.DOCKER_USERNAME }} --password-stdin
+                      
+                      cd ~/deploy
+                      
+                      # Configurar variables de entorno para MySQL
+                      echo "DATABASE_URL=mysql://app:!ChangeMe!@database:3306/app?serverVersion=8.0.32&charset=utf8mb4" >> .env
+                      echo "MYSQL_DATABASE=app" >> .env
+                      echo "MYSQL_USER=app" >> .env
+                      echo "MYSQL_PASSWORD=!ChangeMe!" >> .env
+                      echo "MYSQL_ROOT_PASSWORD=!ChangeMe!" >> .env
 
-      - name: Run migrations
-        run: |
-          php bin/console doctrine:database:create --if-not-exists --no-interaction
-          php bin/console doctrine:migrations:migrate --no-interaction --allow-no-migration
+                      docker-compose -f compose.yml pull
+                      docker-compose -f compose.yml down
+                      docker-compose -f compose.yml up -d --force-recreate
 
-      - name: Clear and warmup cache
-        run: |
-          APP_ENV=prod APP_DEBUG=0 php bin/console cache:clear
-          APP_ENV=prod APP_DEBUG=0 php bin/console cache:warmup
+                      # Esperar a que MySQL esté listo
+                      echo "Esperando a que MySQL esté listo..."
+                      sleep 20
 
-      - name: Deploy to server
-        env:
-          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
-          HOST: ${{ secrets.HOST }}
-          USERNAME: ${{ secrets.USERNAME }}
-          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
-        run: |
-          mkdir -p ~/.ssh
-          echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
-          ssh -o StrictHostKeyChecking=no $USERNAME@$HOST "mkdir -p $DEPLOY_PATH"
-          rsync -avz --delete --no-t --exclude 'tests' --exclude '.git' --exclude 'var/cache/*' . $USERNAME@$HOST:$DEPLOY_PATH
-          ssh -o StrictHostKeyChecking=no $USERNAME@$HOST "cd $DEPLOY_PATH && composer install --no-dev --optimize-autoloader"
-          ssh -o StrictHostKeyChecking=no $USERNAME@$HOST "cd $DEPLOY_PATH && APP_ENV=prod APP_DEBUG=0 php bin/console cache:clear"
-          ssh -o StrictHostKeyChecking=no $USERNAME@$HOST "cd $DEPLOY_PATH && APP_ENV=prod APP_DEBUG=0 php bin/console cache:warmup"
-          ssh -o StrictHostKeyChecking=no $USERNAME@$HOST "sudo systemctl restart apache2"
+                      # Ejecutar migraciones
+                      docker-compose -f compose.yml exec -T symfony_app php bin/console doctrine:database:create --if-not-exists --no-interaction
+                      docker-compose -f compose.yml exec -T symfony_app php bin/console doctrine:migrations:migrate --no-interaction --allow-no-migration
 
-      - name: Build Docker image
-        run: docker build -t ${{ secrets.DOCKER_USERNAME }}/hola-mundo-multilenguaje:${{ github.sha }} .
-
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v2
-        with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
-
-      - name: Push Docker image to Docker Hub
-        run: docker push ${{ secrets.DOCKER_USERNAME }}/hola-mundo-multilenguaje:${{ github.sha }}
+                      # Limpiar caché
+                      docker-compose -f compose.yml exec -T symfony_app php bin/console cache:clear --env=prod
+                      docker-compose -f compose.yml exec -T symfony_app php bin/console cache:warmup --env=prod
