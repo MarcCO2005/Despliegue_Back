@@ -8,18 +8,46 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: app
+          POSTGRES_PASSWORD: !ChangeMe!
+          POSTGRES_DB: app
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v2
 
-  
       - name: Set up PHP
         uses: shivammathur/setup-php@v2
         with:
           php-version: '8.3'
+          extensions: pdo_pgsql
 
       - name: Install dependencies
-        run: composer install
+        run: composer install --no-interaction --no-progress
+
+      - name: Set up environment
+        run: |
+          echo "DATABASE_URL=postgresql://app:!ChangeMe!@127.0.0.1:5432/app?serverVersion=16&charset=utf8" >> .env
+
+      - name: Run migrations
+        run: |
+          php bin/console doctrine:migrations:migrate --no-interaction --allow-no-migration
+
+      - name: Clear cache
+        run: |
+          php bin/console cache:clear --env=prod
+          php bin/console cache:warmup --env=prod
 
       - name: Deploy to server
         env:
