@@ -1,4 +1,4 @@
-name: CI/CD Pipeline for ClubPatinaje
+name: CI/CD Pipeline for Despliegue_Back
 
 on:
   push:
