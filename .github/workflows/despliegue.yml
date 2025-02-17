@@ -16,7 +16,7 @@ jobs:
           POSTGRES_PASSWORD: '!ChangeMe!'
           POSTGRES_DB: app
         ports:
-          - 5432:5432
+          - "5432:5432"
         options: >-
           --health-cmd pg_isready
           --health-interval 10s
@@ -32,22 +32,39 @@ jobs:
         with:
           php-version: '8.3'
           extensions: pdo_pgsql
+          tools: composer:v2
+
+      - name: Copy .env
+        run: php -r "file_exists('.env') || copy('.env.example', '.env');"
+
+      - name: Set environment variables
+        run: |
+          echo "APP_ENV=prod" >> .env
+          echo "APP_DEBUG=0" >> .env
+          echo "DATABASE_URL=postgresql://app:'!ChangeMe!'@localhost:5432/app?serverVersion=16&charset=utf8" >> .env
+          echo "CORS_ALLOW_ORIGIN=^https?://.*?$" >> .env
 
       - name: Install dependencies
-        run: composer install --no-interaction --no-progress
-
-      - name: Set up environment
         run: |
-          echo "DATABASE_URL=postgresql://app:'!ChangeMe!'@127.0.0.1:5432/app?serverVersion=16&charset=utf8" >> .env
+          composer install --prefer-dist --no-progress --no-interaction
+          composer dump-autoload --optimize --no-dev --classmap-authoritative
+
+      - name: Wait for PostgreSQL
+        run: |
+          while ! nc -z localhost 5432; do
+            echo "Waiting for PostgreSQL to start..."
+            sleep 1
+          done
 
       - name: Run migrations
         run: |
+          php bin/console doctrine:database:create --if-not-exists --no-interaction
           php bin/console doctrine:migrations:migrate --no-interaction --allow-no-migration
 
-      - name: Clear cache
+      - name: Clear and warmup cache
         run: |
-          php bin/console cache:clear --env=prod
-          php bin/console cache:warmup --env=prod
+          APP_ENV=prod APP_DEBUG=0 php bin/console cache:clear
+          APP_ENV=prod APP_DEBUG=0 php bin/console cache:warmup
 
       - name: Deploy to server
         env:
@@ -60,8 +77,10 @@ jobs:
           echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
           ssh -o StrictHostKeyChecking=no $USERNAME@$HOST "mkdir -p $DEPLOY_PATH"
-          rsync -avz --delete --no-t --exclude 'tests' --exclude '.git' . $USERNAME@$HOST:$DEPLOY_PATH
+          rsync -avz --delete --no-t --exclude 'tests' --exclude '.git' --exclude 'var/cache/*' . $USERNAME@$HOST:$DEPLOY_PATH
           ssh -o StrictHostKeyChecking=no $USERNAME@$HOST "cd $DEPLOY_PATH && composer install --no-dev --optimize-autoloader"
+          ssh -o StrictHostKeyChecking=no $USERNAME@$HOST "cd $DEPLOY_PATH && APP_ENV=prod APP_DEBUG=0 php bin/console cache:clear"
+          ssh -o StrictHostKeyChecking=no $USERNAME@$HOST "cd $DEPLOY_PATH && APP_ENV=prod APP_DEBUG=0 php bin/console cache:warmup"
           ssh -o StrictHostKeyChecking=no $USERNAME@$HOST "sudo systemctl restart apache2"
 
       - name: Build Docker image
