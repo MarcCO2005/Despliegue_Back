@@ -13,7 +13,7 @@ jobs:
         image: postgres:16-alpine
         env:
           POSTGRES_USER: app
-          POSTGRES_PASSWORD: !ChangeMe!
+          POSTGRES_PASSWORD: '!ChangeMe!'
           POSTGRES_DB: app
         ports:
           - 5432:5432
@@ -38,7 +38,7 @@ jobs:
 
       - name: Set up environment
         run: |
-          echo "DATABASE_URL=postgresql://app:!ChangeMe!@127.0.0.1:5432/app?serverVersion=16&charset=utf8" >> .env
+          echo "DATABASE_URL=postgresql://app:'!ChangeMe!'@127.0.0.1:5432/app?serverVersion=16&charset=utf8" >> .env
 
       - name: Run migrations
         run: |
